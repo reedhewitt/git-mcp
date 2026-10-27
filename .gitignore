@@ -2,3 +2,7 @@
 zig-out/
 zig-pkg/
 *.o
+.DS_Store
+*.swp
+.idea/
+.vscode/
