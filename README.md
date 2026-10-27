@@ -57,6 +57,22 @@ To use a specific `git` binary instead of the first one on `PATH`, set `GIT_MCP_
 }
 ```
 
+Apps launched from the Dock or Finder may start the server with only a minimal environment (roughly `HOME`, `PATH`, `USER`, and `SHELL`), and that `PATH` usually leaves out Homebrew and similar locations. git-mcp, git, and your hooks all see this environment, not your shell's. Set what they need in the `env` block. The paths below are placeholders; use the output of `echo $PATH` and `echo $SSH_AUTH_SOCK` from your own terminal:
+
+```json
+{
+  "mcpServers": {
+    "git": {
+      "command": "/path/to/git-mcp/zig-out/bin/git-mcp",
+      "env": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "SSH_AUTH_SOCK": "/path/to/agent.sock"
+      }
+    }
+  }
+}
+```
+
 Restart the app after editing the config.
 
 ### Suggested agent instruction
@@ -65,7 +81,7 @@ Add a line like this to the agent's global instructions so it does not try to ru
 
 > For all git operations, use the git-mcp tools with the project's absolute host path instead of running git in the shell.
 
-Every repository tool takes an absolute `repo` path on the host (a leading `~/` is accepted), not a path as seen from inside the sandbox.
+Every repository tool takes an absolute `repo` path on the host (a leading `~/` is accepted), not a path as seen from inside the sandbox. `paths` arguments are git pathspecs, relative to `repo`: globs such as `*.txt` match as they do on the command line (`git_resolve` takes literal file names).
 
 ## Tools
 
@@ -124,7 +140,10 @@ Refs, branch, tag, and remote names, and URLs may not begin with `-`, pathspecs 
 
 The server writes one startup line to stderr, showing the version, which `git` it uses, and whether `PATH` and `SSH_AUTH_SOCK` were found (never their values). Claude desktop writes MCP server stderr to `~/Library/Logs/Claude/mcp-server-<name>.log`, where `<name>` is the key you used in the config (`git` in the examples above).
 
-- **SSH agent not visible.** Apps launched from the Dock or Finder do not inherit your shell's `SSH_AUTH_SOCK`. If it is unset, on macOS git-mcp falls back to `launchctl getenv SSH_AUTH_SOCK`. If that is empty too, the startup line says so; set `SSH_AUTH_SOCK` in the config's `env` block, or make sure your agent is loaded at login.
+- **`git`, `gpg`, `git-lfs`, or a hook tool not found.** GUI-launched hosts may pass only a minimal environment (roughly `HOME`, `PATH`, `USER`, `SHELL`), so tools installed by Homebrew or a version manager are not on `PATH`. Errors like `could not run git`, `gpg failed to sign the data`, `git-lfs: command not found`, or a hook failing with `node: command not found` mean this. Set `PATH` in the config's `env` block (see [Configure Claude desktop](#configure-claude-desktop)), or point `GIT_MCP_GIT` at git.
+- **SSH agent not visible.** Apps launched from the Dock or Finder do not inherit your shell's `SSH_AUTH_SOCK`. If it is unset, on macOS git-mcp falls back to `launchctl getenv SSH_AUTH_SOCK`, which finds only the system agent. If that is empty too, the startup line says so; set `SSH_AUTH_SOCK` in the config's `env` block, or make sure your agent is loaded at login.
+- **Keys in a custom SSH agent.** Keys held by 1Password, Secretive, gpg-agent, or an agent started from your shell's rc files are not found by the `launchctl` fallback. Set `SSH_AUTH_SOCK` in the `env` block to that agent's socket, or set `IdentityAgent` for the host in `~/.ssh/config`, which works no matter how git-mcp was launched.
+- **Hooks behave differently than in your terminal.** Hooks run with the server's environment, not your interactive shell's, so anything your shell rc files set up (`PATH` entries, version managers, environment variables) is missing unless you add it to the `env` block.
 - **Passphrase-protected keys.** Git cannot prompt, so a key must already be loaded in the agent. Run `ssh-add` in a terminal (on macOS, `ssh-add --apple-use-keychain` stores the passphrase).
 - **Host key not yet trusted.** Network operations run ssh in batch mode, so an unknown host fails instead of asking. Connect once from a terminal (`ssh git@host`) to add the host to `known_hosts`. git-mcp does not override `GIT_SSH_COMMAND`, `GIT_SSH`, or `core.sshCommand` if you have set them.
 - **Commit signing.** Signing works only if the key or passphrase is available without a terminal. GPG signing that relies on a GUI pinentry needs a pinentry program that works in the host app's session; otherwise sign in your terminal or turn signing off for the repository.
