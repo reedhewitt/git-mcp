@@ -104,4 +104,5 @@ test {
     _ = @import("tools/Args.zig");
     _ = @import("tools/registry.zig");
     _ = @import("tools/inspect.zig");
+    _ = @import("tools/sync.zig");
 }

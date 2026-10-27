@@ -1,8 +1,9 @@
 //! Every tool the server exposes, in `tools/list` order.
 const common = @import("common.zig");
 const inspect = @import("inspect.zig");
+const sync = @import("sync.zig");
 
-pub const all: []const common.Tool = &inspect.tools;
+pub const all: []const common.Tool = &(inspect.tools ++ sync.tools);
 
 pub fn find(name: []const u8) ?common.Tool {
     for (all) |t| {
