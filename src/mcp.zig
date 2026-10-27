@@ -107,11 +107,35 @@ const parse_error = -32700;
 const invalid_request = -32600;
 const method_not_found = -32601;
 const invalid_params = -32602;
+const internal_error = -32603;
 
 /// Response written when an input line exceeds the read buffer.
 pub const too_long_response =
     \\{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error: message exceeds 1 MiB"}}
 ;
+
+/// Fallback when even building an internal-error response fails.
+pub const internal_error_response =
+    \\{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error"}}
+;
+
+/// The -32603 response for `line` after `handleMessage` failed: echoes the
+/// request's id if it can be recovered, uses id null if not, and returns
+/// null for a notification (which is never answered). Returns
+/// `internal_error_response` if it cannot allocate.
+pub fn internalErrorResponse(arena: Allocator, line: []const u8) ?[]const u8 {
+    var id: ?json.Value = null;
+    if (json.parseFromSliceLeaky(json.Value, arena, line, .{})) |root| {
+        if (root == .object) {
+            const raw = root.object.get("id") orelse return null;
+            id = switch (raw) {
+                .string, .integer, .float, .number_string => raw,
+                else => null,
+            };
+        }
+    } else |_| {}
+    return errorResponse(arena, id, internal_error, "Internal error") catch internal_error_response;
+}
 
 const EmptyObject = struct {};
 
@@ -283,4 +307,36 @@ test "tools/call runs the tool" {
     try testing.expectEqual(false, field(r, &.{ "result", "isError" }).bool);
     const content = field(r, &.{ "result", "content" }).array.items;
     try testing.expect(std.mem.indexOf(u8, field(content[0], &.{"text"}).string, "On branch main") != null);
+}
+
+test "internal error response recovers the request id" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const num = internalErrorResponse(a,
+        \\{"jsonrpc":"2.0","id":5,"method":"tools/call"}
+    ).?;
+    const v = try json.parseFromSliceLeaky(json.Value, a, num, .{});
+    try testing.expectEqual(@as(i64, 5), field(v, &.{"id"}).integer);
+    try testing.expectEqual(@as(i64, -32603), errorCode(v));
+
+    const str = try json.parseFromSliceLeaky(json.Value, a, internalErrorResponse(a,
+        \\{"jsonrpc":"2.0","id":"x","method":"tools/call"}
+    ).?, .{});
+    try testing.expectEqualStrings("x", field(str, &.{"id"}).string);
+
+    // Unrecoverable id: answered with id null.
+    const bad = try json.parseFromSliceLeaky(json.Value, a, internalErrorResponse(a, "{nope").?, .{});
+    try testing.expect(field(bad, &.{"id"}) == .null);
+    try testing.expectEqual(@as(i64, -32603), errorCode(bad));
+
+    // Notifications are never answered.
+    try testing.expectEqual(@as(?[]const u8, null), internalErrorResponse(a,
+        \\{"jsonrpc":"2.0","method":"notifications/initialized"}
+    ));
+
+    const fixed = try json.parseFromSliceLeaky(json.Value, a, internal_error_response, .{});
+    try testing.expect(field(fixed, &.{"id"}) == .null);
+    try testing.expectEqual(@as(i64, -32603), errorCode(fixed));
 }

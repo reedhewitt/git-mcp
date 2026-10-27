@@ -65,10 +65,13 @@ pub fn main(init: std.process.Init) !void {
         const line = if (std.mem.endsWith(u8, raw, "\r")) raw[0 .. raw.len - 1] else raw;
         if (std.mem.trim(u8, line, " \t").len == 0) continue;
 
-        const response = server.handleMessage(arena_state.allocator(), line) catch |err| {
+        const response = server.handleMessage(arena_state.allocator(), line) catch |err| blk: {
             var buf: [128]u8 = undefined;
             logStderr(io, std.fmt.bufPrint(&buf, "git-mcp: failed to handle message: {s}\n", .{@errorName(err)}) catch "git-mcp: failed to handle message\n");
-            continue;
+            // Still answer the request so the client is not left waiting.
+            // `line` lives in the stdin buffer, so resetting the arena is safe.
+            _ = arena_state.reset(.retain_capacity);
+            break :blk mcp.internalErrorResponse(arena_state.allocator(), line);
         };
         if (response) |r| {
             try out.writeAll(r);
