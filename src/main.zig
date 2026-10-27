@@ -107,4 +107,5 @@ test {
     _ = @import("tools/sync.zig");
     _ = @import("tools/stage.zig");
     _ = @import("tools/branch.zig");
+    _ = @import("tools/integrate.zig");
 }
