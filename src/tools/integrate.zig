@@ -150,14 +150,14 @@ fn resolve(ctx: *Ctx, args: Args) !ToolResult {
     // --relative: report paths relative to `repo`, matching what the agent sends.
     const listed = try ctx.runner.run(ctx.arena, .{
         .cwd = repo,
-        .args = &.{ "diff", "--name-only", "--relative", "--diff-filter=U" },
+        .args = &.{ "diff", "--name-only", "-z", "--relative", "--diff-filter=U" },
     });
     if (listed.timed_out or listed.exit_code == null or listed.exit_code.? != 0) {
         return common.formatResult(ctx.arena, listed);
     }
     for (paths) |p| {
         var found = false;
-        var it = std.mem.splitScalar(u8, listed.stdout, '\n');
+        var it = std.mem.splitScalar(u8, listed.stdout, 0);
         while (it.next()) |line| {
             if (line.len > 0 and std.mem.eql(u8, line, p)) found = true;
         }
@@ -165,6 +165,8 @@ fn resolve(ctx: *Ctx, args: Args) !ToolResult {
     }
 
     var argv: std.ArrayList([]const u8) = .empty;
+    // Literal pathspecs: a name like "[x].txt" must not glob onto other files.
+    try appendStr(ctx, &argv, "--literal-pathspecs");
     try appendStr(ctx, &argv, "checkout");
     try appendStr(ctx, &argv, if (side == .ours) "--ours" else "--theirs");
     try appendStr(ctx, &argv, "--");
@@ -327,4 +329,106 @@ test "merge options and validation" {
     try expectErr(try call1(f, "git_merge", r, ",\"action\":\"start\""), "ref");
     try expectOk(try call1(f, "git_merge", r, ",\"action\":\"start\",\"ref\":\"feat\",\"no_ff\":true,\"message\":\"Merge feat\""));
     try testing.expectEqualStrings("Merge feat\n", try f.git(r, &.{ "log", "-1", "--format=%s" }));
+}
+
+test "resolve treats pathspecs literally" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try f.initRepo("r");
+    try f.commitFile(r, "x.txt", "x1\n", "x");
+    try f.commitFile(r, "[x].txt", "base\n", "base");
+    _ = try f.git(r, &.{ "switch", "-q", "-c", "feat" });
+    try f.commitFile(r, "[x].txt", "feat\n", "feat edit");
+    _ = try f.git(r, &.{ "switch", "-q", "main" });
+    try f.commitFile(r, "[x].txt", "main\n", "main edit");
+    try expectErr(try call1(f, "git_merge", r, ",\"action\":\"start\",\"ref\":\"feat\""), "CONFLICT");
+    try f.writeFile("r/x.txt", "x-local\n");
+
+    try expectOk(try call1(f, "git_resolve", r, ",\"paths\":[\"[x].txt\"],\"side\":\"theirs\""));
+    try testing.expect(contains(try f.git(r, &.{ "diff", "--", "x.txt" }), "+x-local"));
+    try expectOk(try call1(f, "git_add", r, ",\"paths\":[\"[x].txt\"]"));
+    try testing.expectEqualStrings("feat\n", try f.git(r, &.{ "show", ":[x].txt" }));
+}
+
+test "resolve handles quoted file names" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try f.initRepo("r");
+    try f.commitFile(r, "a\"b.txt", "base\n", "base");
+    _ = try f.git(r, &.{ "switch", "-q", "-c", "feat" });
+    try f.commitFile(r, "a\"b.txt", "feat\n", "feat edit");
+    _ = try f.git(r, &.{ "switch", "-q", "main" });
+    try f.commitFile(r, "a\"b.txt", "main\n", "main edit");
+    try expectErr(try call1(f, "git_merge", r, ",\"action\":\"start\",\"ref\":\"feat\""), "CONFLICT");
+    try expectOk(try call1(f, "git_resolve", r, ",\"paths\":[\"a\\\"b.txt\"],\"side\":\"ours\""));
+}
+
+test "resolve rejects directories and dot" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try f.initRepo("r");
+    try f.commitFile(r, "sub/clean", "c\n", "clean");
+    try conflictingBranches(f, r);
+    try expectErr(try call1(f, "git_merge", r, ",\"action\":\"start\",\"ref\":\"feat\""), "CONFLICT");
+    try f.writeFile("r/sub/clean", "dirty\n");
+    try expectErr(try call1(f, "git_resolve", r, ",\"paths\":[\".\"],\"side\":\"ours\""), "not in conflict");
+    try expectErr(try call1(f, "git_resolve", r, ",\"paths\":[\"sub/\"],\"side\":\"theirs\""), "not in conflict");
+    try testing.expect(contains(try f.git(r, &.{ "diff", "--", "sub/clean" }), "+dirty"));
+}
+
+test "resolve from a subdirectory repo uses relative paths" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try f.initRepo("r");
+    try f.commitFile(r, "sub/f", "base\n", "base");
+    _ = try f.git(r, &.{ "switch", "-q", "-c", "feat" });
+    try f.commitFile(r, "sub/f", "feat\n", "feat edit");
+    _ = try f.git(r, &.{ "switch", "-q", "main" });
+    try f.commitFile(r, "sub/f", "main\n", "main edit");
+    try expectErr(try call1(f, "git_merge", r, ",\"action\":\"start\",\"ref\":\"feat\""), "CONFLICT");
+    const sub = try std.fs.path.join(f.arena(), &.{ r, "sub" });
+    try expectOk(try call1(f, "git_resolve", sub, ",\"paths\":[\"f\"],\"side\":\"theirs\""));
+    try expectOk(try call1(f, "git_add", sub, ",\"paths\":[\"f\"]"));
+    try expectOk(try call1(f, "git_merge", r, ",\"action\":\"continue\""));
+    try testing.expectEqualStrings("feat\n", try f.git(r, &.{ "show", "HEAD:sub/f" }));
+}
+
+test "rebase skip" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try f.initRepo("r");
+    try conflictingBranches(f, r);
+    _ = try f.git(r, &.{ "switch", "-q", "feat" });
+    try expectErr(try call1(f, "git_rebase", r, ",\"action\":\"start\",\"upstream\":\"main\""), "CONFLICT");
+    try expectOk(try call1(f, "git_rebase", r, ",\"action\":\"skip\""));
+    try testing.expectEqualStrings("main edit\n", try f.git(r, &.{ "log", "-1", "--format=%s" }));
+    try testing.expectEqualStrings("feat\n", try f.git(r, &.{ "branch", "--show-current" }));
+}
+
+test "cherry-pick conflict then abort" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try f.initRepo("r");
+    try conflictingBranches(f, r);
+    const orig = try f.arena().dupe(u8, try f.git(r, &.{ "rev-parse", "HEAD" }));
+    try expectErr(try call1(f, "git_cherry_pick", r, ",\"action\":\"start\",\"refs\":[\"feat\"]"), "CONFLICT");
+    try expectOk(try call1(f, "git_cherry_pick", r, ",\"action\":\"abort\""));
+    try testing.expectEqualStrings(orig, try f.git(r, &.{ "rev-parse", "HEAD" }));
+}
+
+test "rebase onto" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try f.initRepo("r");
+    try f.commitFile(r, "a", "1\n", "a");
+    _ = try f.git(r, &.{ "switch", "-q", "-c", "mid" });
+    try f.commitFile(r, "m", "m\n", "mid");
+    _ = try f.git(r, &.{ "switch", "-q", "-c", "topic" });
+    try f.commitFile(r, "t", "t\n", "topic");
+    _ = try f.git(r, &.{ "switch", "-q", "main" });
+    try f.commitFile(r, "z", "z\n", "main z");
+    _ = try f.git(r, &.{ "switch", "-q", "topic" });
+    try expectOk(try call1(f, "git_rebase", r, ",\"action\":\"start\",\"upstream\":\"mid\",\"onto\":\"main\""));
+    const tree = try f.git(r, &.{ "ls-tree", "--name-only", "HEAD" });
+    try testing.expect(contains(tree, "z") and contains(tree, "t") and !contains(tree, "m\n"));
 }
