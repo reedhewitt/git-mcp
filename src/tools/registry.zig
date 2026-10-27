@@ -3,8 +3,9 @@ const common = @import("common.zig");
 const inspect = @import("inspect.zig");
 const sync = @import("sync.zig");
 const stage = @import("stage.zig");
+const branch = @import("branch.zig");
 
-pub const all: []const common.Tool = &(inspect.tools ++ sync.tools ++ stage.tools);
+pub const all: []const common.Tool = &(inspect.tools ++ sync.tools ++ stage.tools ++ branch.tools);
 
 pub fn find(name: []const u8) ?common.Tool {
     for (all) |t| {
