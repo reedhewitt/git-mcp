@@ -92,18 +92,33 @@ pub fn formatResult(arena: Allocator, r: git_mod.Result) !ToolResult {
 }
 
 /// Runs `tool` and maps its errors to tool results: `error.Invalid` becomes
-/// the validation message, anything else an internal error. The text is
+/// the validation message, a failure to start git names `git_exe`, and
+/// anything else is an internal error. The text is
 /// always valid UTF-8 (it is embedded in JSON).
 pub fn invoke(ctx: *Ctx, tool: Tool, args: Args) !ToolResult {
     var res = tool.handler(ctx, args) catch |err| switch (err) {
         error.Invalid => ToolResult{ .text = try ctx.arena.dupe(u8, ctx.diag.msg), .is_error = true },
         else => ToolResult{
-            .text = try std.fmt.allocPrint(ctx.arena, "internal error: {s}", .{@errorName(err)}),
+            .text = if (isSpawnError(err))
+                try std.fmt.allocPrint(ctx.arena, "could not run git ('{s}'): {s}; set GIT_MCP_GIT or PATH", .{ ctx.runner.git_exe, @errorName(err) })
+            else
+                try std.fmt.allocPrint(ctx.arena, "internal error: {s}", .{@errorName(err)}),
             .is_error = true,
         },
     };
     res.text = try text.sanitizeUtf8(ctx.arena, res.text);
     return res;
+}
+
+/// True for errors in `std.process.SpawnError` (git not found, not
+/// executable, …). Handlers do no file I/O of their own that can fail this
+/// way; only reading git's pipes shares a few of these names.
+fn isSpawnError(err: anyerror) bool {
+    if (err == error.OutOfMemory or err == error.Canceled) return false;
+    inline for (comptime @typeInfo(std.process.SpawnError).error_set.error_names.?) |name| {
+        if (err == @field(anyerror, name)) return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------- tests
@@ -160,4 +175,19 @@ test "formatResult sanitizes and truncates" {
 
     const capped = try formatResult(a, .{ .exit_code = 0, .stdout = "short", .stderr = "", .truncated = true });
     try testing.expectEqualStrings("short" ++ truncation_note, capped.text);
+}
+
+test "a git that cannot be spawned gets a clear message" {
+    const Fixture = @import("../testutil.zig").Fixture;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try f.initRepo("r");
+    f.runner.git_exe = "/nonexistent/git";
+    const want = "could not run git ('/nonexistent/git'): FileNotFound; set GIT_MCP_GIT or PATH";
+    // A plain run, and push, whose helper queries run git first.
+    for ([_][]const u8{ "git_status", "git_push" }) |tool| {
+        const res = try f.call(tool, try std.fmt.allocPrint(f.arena(), "{{\"repo\":\"{s}\"}}", .{r}));
+        try testing.expect(res.is_error);
+        try testing.expectEqualStrings(want, res.text);
+    }
 }
