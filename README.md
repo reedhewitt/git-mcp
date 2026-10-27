@@ -78,7 +78,7 @@ Every repository tool takes an absolute `repo` path on the host (a leading `~/` 
 | `git_blame` | Which commit and author last changed each line of a file, optionally for a line range. |
 | `git_fetch` | Download commits, branches, and tags from a remote without touching your working tree. |
 | `git_pull` | Fetch and integrate into the current branch (merge, rebase, or fast-forward only). |
-| `git_push` | Push one branch to a remote. Never forces, deletes remote refs, or mirrors. |
+| `git_push` | Push one branch to the remote branch of the same name (like `push.default=simple`). The remote is `remote`, else the branch's `pushRemote`, `remote.pushDefault`, its upstream remote, or `origin`. If the current branch tracks a differently named branch on that remote, it refuses unless you pass `branch`. Never forces, deletes remote refs, or mirrors. |
 | `git_clone` | Clone a remote repository into a new directory. |
 | `git_init` | Create a new repository; safe in an existing one. |
 | `git_remote` | `list`, `add`, `set_url`, or `rename` remotes. |

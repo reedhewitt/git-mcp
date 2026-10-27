@@ -11,6 +11,10 @@ const remote_prop =
     \\"remote":{"type":"string","description":"Remote name (default: the branch's upstream remote, else git's default)."}
 ;
 
+const push_remote_prop =
+    \\"remote":{"type":"string","description":"Remote to push to (default: the branch's pushRemote, then remote.pushDefault, then its upstream remote, then origin)."}
+;
+
 pub const tools = [_]common.Tool{
     .{
         .name = "git_fetch",
@@ -30,9 +34,9 @@ pub const tools = [_]common.Tool{
     },
     .{
         .name = "git_push",
-        .description = "Upload the commits of one local branch to a remote. Use it after committing to publish your work. It pushes the current branch (or 'branch') to its upstream branch on the remote, or to a branch of the same name. It NEVER force-pushes, deletes remote branches, or mirrors, even if git config asks for it. If the push is rejected as non-fast-forward (the remote has commits you don't), run git_pull, resolve any conflicts, and push again. Runs on the HOST with the user's SSH agent and credentials.",
-        .schema = "{\"type\":\"object\",\"properties\":{" ++ common.repo_prop ++ "," ++ remote_prop ++
-            \\,"branch":{"type":"string","description":"Local branch to push (default: the current branch). A plain name only: no '+' or ':' refspecs."},"set_upstream":{"type":"boolean","description":"Record the pushed branch as this branch's upstream (git push -u). Use on the first push of a new branch."},"tags":{"type":"boolean","description":"Also push tags (never forced: tags that differ on the remote are rejected)."}},"required":["repo"]}
+        .description = "Upload the commits of one local branch to a remote. Use it after committing to publish your work. It pushes the current branch (or 'branch') to the branch of the SAME name on the remote, like git's push.default=simple. If the current branch tracks a differently named remote branch (e.g. a 'feat' branch created from origin/main), it refuses rather than update that branch; pass 'branch' to push it under its own name. It NEVER force-pushes, deletes remote branches, or mirrors, even if git config asks for it. If the push is rejected as non-fast-forward (the remote has commits you don't), run git_pull, resolve any conflicts, and push again. Runs on the HOST with the user's SSH agent and credentials.",
+        .schema = "{\"type\":\"object\",\"properties\":{" ++ common.repo_prop ++ "," ++ push_remote_prop ++
+            \\,"branch":{"type":"string","description":"Local branch to push (default: the current branch); it is pushed to the remote branch of the same name. A plain name only: no '+' or ':' refspecs."},"set_upstream":{"type":"boolean","description":"Record the pushed branch as this branch's upstream (git push -u). Use on the first push of a new branch."},"tags":{"type":"boolean","description":"Also push tags (never forced: tags that differ on the remote are rejected)."}},"required":["repo"]}
         ,
         .handler = push,
     },
@@ -125,17 +129,28 @@ fn push(ctx: *Ctx, args: Args) !ToolResult {
         return ctx.fail("HEAD is detached; pass 'branch' explicitly", .{});
     try validate.checkPushBranch(branch, &ctx.diag);
 
+    // push.default=simple: pick the remote the way `git push` does, and
+    // always push to the branch of the same name.
     const upstream_remote = try configGet(ctx, repo, "branch.{s}.remote", .{branch});
-    const r = remote_arg orelse upstream_remote orelse "origin";
+    const r = remote_arg orelse
+        try configGet(ctx, repo, "branch.{s}.pushRemote", .{branch}) orelse
+        try query(ctx, repo, &.{ "config", "--get", "remote.pushDefault" }) orelse
+        upstream_remote orelse "origin";
     try validate.checkName("remote", r, &ctx.diag);
+    if (std.mem.eql(u8, r, ".")) return ctx.fail("remote '.' is a local repository; nothing to push", .{});
 
-    var dst = branch;
-    if (upstream_remote) |ur| if (std.mem.eql(u8, ur, r)) {
+    // Without an explicit 'branch', refuse when the upstream on this remote
+    // has a different name (git's "simple" rule). A merge value outside
+    // refs/heads/ counts as different.
+    if (branch_arg == null) if (upstream_remote) |ur| if (std.mem.eql(u8, ur, r)) {
         if (try configGet(ctx, repo, "branch.{s}.merge", .{branch})) |merge| {
-            dst = if (std.mem.startsWith(u8, merge, "refs/heads/")) merge["refs/heads/".len..] else merge;
+            const heads = "refs/heads/";
+            const other = if (std.mem.startsWith(u8, merge, heads)) merge[heads.len..] else merge;
+            if (!std.mem.startsWith(u8, merge, heads) or !std.mem.eql(u8, other, branch)) {
+                return ctx.fail("branch '{s}' tracks '{s}/{s}', a different name; push refuses to update a differently named remote branch. Pass 'branch' to push '{s}' under its own name, or push from a terminal.", .{ branch, r, other, branch });
+            }
         }
     };
-    try validate.checkPushBranch(dst, &ctx.diag);
 
     const mirror_key = try std.fmt.allocPrint(ctx.arena, "remote.{s}.mirror", .{r});
     if (try query(ctx, repo, &.{ "config", "--type=bool", "--get", mirror_key })) |m| {
@@ -145,7 +160,7 @@ fn push(ctx: *Ctx, args: Args) !ToolResult {
     }
 
     // An explicit refspec without '+' overrides any configured remote.<r>.push.
-    const refspec = try std.fmt.allocPrint(ctx.arena, "refs/heads/{s}:refs/heads/{s}", .{ branch, dst });
+    const refspec = try std.fmt.allocPrint(ctx.arena, "refs/heads/{s}:refs/heads/{s}", .{ branch, branch });
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.append(ctx.arena, "push");
     if (try args.boolean("set_upstream") orelse false) try argv.append(ctx.arena, "-u");
@@ -236,6 +251,11 @@ fn expectErr(res: ToolResult, needle: []const u8) !void {
     try testing.expect(contains(res.text, needle));
 }
 
+fn refExists(f: *Fixture, repo: []const u8, ref: []const u8) !bool {
+    const res = try f.runner.run(f.arena(), .{ .cwd = repo, .args = &.{ "rev-parse", "--verify", "-q", ref } });
+    return res.exit_code != null and res.exit_code.? == 0;
+}
+
 /// `a` (main, one commit) pushed to bare `origin.git` with upstream set.
 fn pushedRepo(f: *Fixture) !struct { a: []const u8, bare: []const u8 } {
     const bare = try f.initBare("origin.git");
@@ -276,23 +296,76 @@ test "init, commit, push, clone, pull round trip" {
     try testing.expect(fileExists(f.path("b/second")));
 }
 
-test "push uses the upstream branch name when it tracks the same remote" {
+test "push refuses to publish a branch into a differently named upstream" {
     const f = try Fixture.init();
     defer f.deinit();
     const ar = f.arena();
     const r = try pushedRepo(f);
-    _ = try f.git(r.a, &.{ "checkout", "-q", "-b", "local-topic" });
-    try f.commitFile(r.a, "t", "t\n", "topic");
-    _ = try f.git(r.a, &.{ "push", "-q", "origin", "local-topic:remote-topic" });
-    _ = try f.git(r.a, &.{ "branch", "-q", "--set-upstream-to=origin/remote-topic" });
-    try f.commitFile(r.a, "t2", "t2\n", "topic 2");
+    _ = try f.git(r.a, &.{ "fetch", "-q", "origin" });
+    _ = try f.git(r.a, &.{ "switch", "-q", "-c", "feat", "--track", "origin/main" });
+    try testing.expectEqualStrings("refs/heads/main\n", try f.git(r.a, &.{ "config", "branch.feat.merge" }));
+    try f.commitFile(r.a, "feat", "f\n", "feature");
+    const main_before = try f.git(r.bare, &.{ "rev-parse", "refs/heads/main" });
 
-    try expectOk(try f.call("git_push", try std.fmt.allocPrint(ar, "{{\"repo\":\"{s}\"}}", .{r.a})));
+    const res = try f.call("git_push", try std.fmt.allocPrint(ar, "{{\"repo\":\"{s}\"}}", .{r.a}));
+    try expectErr(res, "branch 'feat' tracks 'origin/main', a different name; push refuses to update a differently named remote branch. Pass 'branch' to push 'feat' under its own name, or push from a terminal.");
+    try testing.expectEqualStrings(main_before, try f.git(r.bare, &.{ "rev-parse", "refs/heads/main" }));
+    try testing.expect(!try refExists(f, r.bare, "refs/heads/feat"));
+
+    // Naming the branch explicitly pushes it under its own name.
+    try expectOk(try f.call("git_push", try std.fmt.allocPrint(ar, "{{\"repo\":\"{s}\",\"branch\":\"feat\"}}", .{r.a})));
+    try testing.expectEqualStrings(try f.git(r.a, &.{ "rev-parse", "feat" }), try f.git(r.bare, &.{ "rev-parse", "refs/heads/feat" }));
+    try testing.expectEqualStrings(main_before, try f.git(r.bare, &.{ "rev-parse", "refs/heads/main" }));
+}
+
+test "push treats a merge value outside refs/heads as mismatched" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try pushedRepo(f);
+    _ = try f.git(r.a, &.{ "config", "branch.main.merge", "main" });
+    const res = try f.call("git_push", try std.fmt.allocPrint(f.arena(), "{{\"repo\":\"{s}\"}}", .{r.a}));
+    try expectErr(res, "branch 'main' tracks 'origin/main', a different name");
+}
+
+test "push honors branch pushRemote and remote.pushDefault" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ar = f.arena();
+    const r = try pushedRepo(f);
+    const fork = try f.initBare("fork.git");
+    const other = try f.initBare("other.git");
+    _ = try f.git(r.a, &.{ "remote", "add", "fork", fork });
+    _ = try f.git(r.a, &.{ "remote", "add", "other", other });
+    try f.commitFile(r.a, "two", "2\n", "second");
     const head = try f.git(r.a, &.{ "rev-parse", "HEAD" });
-    try testing.expectEqualStrings(head, try f.git(r.bare, &.{ "rev-parse", "refs/heads/remote-topic" }));
-    // No branch was created under the local name.
-    const res = try f.runner.run(ar, .{ .cwd = r.bare, .args = &.{ "rev-parse", "--verify", "-q", "refs/heads/local-topic" } });
-    try testing.expect(res.exit_code.? != 0);
+    const origin_before = try f.git(r.bare, &.{ "rev-parse", "refs/heads/main" });
+
+    _ = try f.git(r.a, &.{ "config", "remote.pushDefault", "other" });
+    try expectOk(try f.call("git_push", try std.fmt.allocPrint(ar, "{{\"repo\":\"{s}\"}}", .{r.a})));
+    try testing.expectEqualStrings(head, try f.git(other, &.{ "rev-parse", "refs/heads/main" }));
+
+    // branch.<b>.pushRemote wins over remote.pushDefault.
+    _ = try f.git(r.a, &.{ "config", "branch.main.pushRemote", "fork" });
+    try expectOk(try f.call("git_push", try std.fmt.allocPrint(ar, "{{\"repo\":\"{s}\"}}", .{r.a})));
+    try testing.expectEqualStrings(head, try f.git(fork, &.{ "rev-parse", "refs/heads/main" }));
+
+    // The upstream remote was never pushed to.
+    try testing.expectEqualStrings(origin_before, try f.git(r.bare, &.{ "rev-parse", "refs/heads/main" }));
+}
+
+test "push rejects the local remote '.'" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ar = f.arena();
+    const r = try pushedRepo(f);
+    const explicit = try f.call("git_push", try std.fmt.allocPrint(ar, "{{\"repo\":\"{s}\",\"remote\":\".\"}}", .{r.a}));
+    try expectErr(explicit, "remote '.' is a local repository; nothing to push");
+
+    // `git branch -t topic main` records remote '.'.
+    _ = try f.git(r.a, &.{ "switch", "-q", "-c", "topic", "--track", "main" });
+    try testing.expectEqualStrings(".\n", try f.git(r.a, &.{ "config", "branch.topic.remote" }));
+    const configured = try f.call("git_push", try std.fmt.allocPrint(ar, "{{\"repo\":\"{s}\"}}", .{r.a}));
+    try expectErr(configured, "remote '.' is a local repository; nothing to push");
 }
 
 test "push never forces, even with force refspec in config" {
@@ -355,7 +428,7 @@ test "push rejects glob branch names and pushes nothing" {
     }
     // A glob upstream in config is rejected too.
     _ = try f.git(r.a, &.{ "config", "branch.main.merge", "refs/heads/*" });
-    try expectErr(try f.call("git_push", try std.fmt.allocPrint(f.arena(), "{{\"repo\":\"{s}\"}}", .{r.a})), "not a valid branch name");
+    try expectErr(try f.call("git_push", try std.fmt.allocPrint(f.arena(), "{{\"repo\":\"{s}\"}}", .{r.a})), "a different name");
     try testing.expectEqualStrings(before, try f.git(r.bare, &.{ "for-each-ref", "--format=%(refname)" }));
 }
 
@@ -376,7 +449,8 @@ test "push rejects a force-looking upstream from config" {
     const r = try pushedRepo(f);
     _ = try f.git(r.a, &.{ "config", "branch.main.merge", "+refs/heads/main" });
     const res = try f.call("git_push", try std.fmt.allocPrint(f.arena(), "{{\"repo\":\"{s}\"}}", .{r.a}));
-    try expectErr(res, "terminal");
+    try expectErr(res, "a different name");
+    try expectErr(res, "push from a terminal");
 }
 
 test "push from detached HEAD without branch fails clearly" {
