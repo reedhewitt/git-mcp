@@ -105,4 +105,5 @@ test {
     _ = @import("tools/registry.zig");
     _ = @import("tools/inspect.zig");
     _ = @import("tools/sync.zig");
+    _ = @import("tools/stage.zig");
 }
