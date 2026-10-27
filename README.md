@@ -83,11 +83,11 @@ Every repository tool takes an absolute `repo` path on the host (a leading `~/` 
 | `git_init` | Create a new repository; safe in an existing one. |
 | `git_remote` | `list`, `add`, `set_url`, or `rename` remotes. |
 | `git_add` | Stage specific `paths`, or everything with `all`. |
-| `git_unstage` | Remove files from the index and keep your edits. |
+| `git_unstage` | Reset files' index entries to the last commit; working-tree files are never changed, so your edits stay as unstaged changes. |
 | `git_rm` | Remove tracked files and stage the removal; `cached` keeps them on disk. Never forces. |
 | `git_mv` | Move or rename a tracked file; never overwrites. |
 | `git_commit` | Commit the staged changes; supports `amend`. |
-| `git_reset` | Move the branch with `soft` or `mixed` (default). Working-tree files are never overwritten. |
+| `git_reset` | Move the branch with `soft` or `mixed` (default). Working-tree files are never changed; `mixed` resets the staging area to the target commit (staged-but-uncommitted changes become unstaged). |
 | `git_branch` | `list`, `create`, `rename`, `delete` (safe delete only), or `set_upstream`. |
 | `git_switch` | Switch branches, create one, or detach. Refuses rather than discard changes. |
 | `git_tag` | `list` or `create` tags (lightweight or annotated); never overwrites. |

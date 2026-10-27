@@ -1,5 +1,7 @@
 //! Staging and committing: add, unstage, rm, mv, commit, reset. None of these
-//! pass `-f`/`--force`/`--hard`, so they cannot discard uncommitted work.
+//! pass `-f`/`--force`/`--hard`, so working-tree files with uncommitted
+//! changes are never overwritten. `unstage` and a mixed `reset` do rewrite
+//! the index, so a staged version that differs from the working tree is lost.
 const std = @import("std");
 const common = @import("common.zig");
 const Ctx = common.Ctx;
@@ -18,7 +20,7 @@ pub const tools = [_]common.Tool{
     },
     .{
         .name = "git_unstage",
-        .description = "Remove files from the staging area without touching their contents in the working tree (the inverse of git_add). Works in a repository with no commits yet. Your edits are kept.",
+        .description = "Unstage files: reset their staging-area (index) entries to the last commit, the inverse of git_add. Working-tree files are never changed, so your edits stay on disk as unstaged changes. A staged version that differs from the working-tree file is dropped from the index. Works in a repository with no commits yet (the files become untracked).",
         .schema = "{\"type\":\"object\",\"properties\":{" ++ common.repo_prop ++
             \\,"paths":{"type":"array","items":{"type":"string"},"description":"Files or directories to unstage."}},"required":["repo","paths"]}
         ,
@@ -50,7 +52,7 @@ pub const tools = [_]common.Tool{
     },
     .{
         .name = "git_reset",
-        .description = "Move the current branch to another commit, e.g. to undo the last commit. 'soft' keeps your changes staged; 'mixed' (default) keeps them in the working tree but unstaged. Working-tree files are never overwritten, so this cannot discard uncommitted work (there is no hard mode).",
+        .description = "Move the current branch to another commit, e.g. to undo the last commit. 'soft' keeps the undone commits' changes staged and leaves the staging area alone. 'mixed' (default) resets the staging area to the target commit: the undone changes, and any staged-but-uncommitted changes, become unstaged. Working-tree files are never changed (there is no hard mode).",
         .schema = "{\"type\":\"object\",\"properties\":{" ++ common.repo_prop ++
             \\,"mode":{"type":"string","enum":["soft","mixed"],"description":"soft or mixed (default mixed)."},"ref":{"type":"string","description":"Commit to move to (default HEAD), e.g. HEAD~1."}},"required":["repo"]}
         ,
@@ -135,7 +137,8 @@ fn reset(ctx: *Ctx, args: Args) !ToolResult {
     const ref = try args.str("ref") orelse "HEAD";
     try validate.checkName("ref", ref, &ctx.diag);
     const flag = try std.fmt.allocPrint(ctx.arena, "--{s}", .{@tagName(mode)});
-    return ctx.git(repo, &.{ "reset", flag, ref }, false);
+    // `--`: a ref that does not resolve must never be read as a path.
+    return ctx.git(repo, &.{ "reset", flag, ref, "--" }, false);
 }
 
 // ---------------------------------------------------------------- tests
@@ -268,4 +271,16 @@ test "reset soft and mixed only" {
     try expectErr(try call1(f, "git_reset", r, ",\"mode\":\"hard\""), "soft, mixed");
     try expectErr(try call1(f, "git_reset", r, ",\"ref\":\"--hard\""), "'-'");
     try testing.expect(fileExists(f.path("r/b")));
+}
+
+test "reset never reads ref as a path" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try f.initRepo("r");
+    try f.commitFile(r, "a", "1\n", "first");
+    try f.writeFile("r/a", "2\n");
+    _ = try f.git(r, &.{ "add", "--", "a" });
+    // 'a' is a file, not a commit: without `--`, git would unstage it.
+    try expectErr(try call1(f, "git_reset", r, ",\"ref\":\"a\""), "git exited");
+    try testing.expectEqualStrings("M  a\n", try f.git(r, &.{ "status", "--porcelain" }));
 }
