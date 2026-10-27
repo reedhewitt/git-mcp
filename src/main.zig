@@ -108,4 +108,5 @@ test {
     _ = @import("tools/stage.zig");
     _ = @import("tools/branch.zig");
     _ = @import("tools/integrate.zig");
+    _ = @import("tools/guard_test.zig");
 }
