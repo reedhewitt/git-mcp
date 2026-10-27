@@ -64,7 +64,7 @@ const SeqAction = enum { start, @"continue", abort, skip };
 /// `git <cmd> --continue|--abort|--skip` for the non-start actions.
 fn control(ctx: *Ctx, repo: []const u8, cmd: []const u8, action: []const u8) !ToolResult {
     const flag = try std.fmt.allocPrint(ctx.arena, "--{s}", .{action});
-    return ctx.git(repo, &.{ cmd, flag }, false);
+    return ctx.gitLong(repo, &.{ cmd, flag });
 }
 
 fn merge(ctx: *Ctx, args: Args) !ToolResult {
@@ -84,7 +84,7 @@ fn merge(ctx: *Ctx, args: Args) !ToolResult {
     if (try args.boolean("squash") orelse false) try appendStr(ctx, &argv, "--squash");
     if (try args.str("message")) |m| try appendStr(ctx, &argv, try std.fmt.allocPrint(ctx.arena, "--message={s}", .{m}));
     try appendStr(ctx, &argv, ref);
-    return ctx.git(repo, argv.items, false);
+    return ctx.gitLong(repo, argv.items);
 }
 
 fn rebase(ctx: *Ctx, args: Args) !ToolResult {
@@ -102,7 +102,7 @@ fn rebase(ctx: *Ctx, args: Args) !ToolResult {
         try appendStr(ctx, &argv, onto);
     }
     try appendStr(ctx, &argv, upstream);
-    return ctx.git(repo, argv.items, false);
+    return ctx.gitLong(repo, argv.items);
 }
 
 fn refList(ctx: *Ctx, args: Args) ![]const []const u8 {
@@ -121,7 +121,7 @@ fn cherryPick(ctx: *Ctx, args: Args) !ToolResult {
     var argv: std.ArrayList([]const u8) = .empty;
     try appendStr(ctx, &argv, "cherry-pick");
     try argv.appendSlice(ctx.arena, refs);
-    return ctx.git(repo, argv.items, false);
+    return ctx.gitLong(repo, argv.items);
 }
 
 fn revert(ctx: *Ctx, args: Args) !ToolResult {
@@ -135,7 +135,7 @@ fn revert(ctx: *Ctx, args: Args) !ToolResult {
     try appendStr(ctx, &argv, "--no-edit");
     if (try args.boolean("no_commit") orelse false) try appendStr(ctx, &argv, "--no-commit");
     try argv.appendSlice(ctx.arena, refs);
-    return ctx.git(repo, argv.items, false);
+    return ctx.gitLong(repo, argv.items);
 }
 
 const Side = enum { ours, theirs };

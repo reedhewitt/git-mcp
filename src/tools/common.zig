@@ -38,6 +38,13 @@ pub const Ctx = struct {
         return formatResult(ctx.arena, r);
     }
 
+    /// Like `git` for local ops that run hooks (commit, merge, rebase,
+    /// cherry-pick, revert, stash, switch): they get the longer timeout.
+    pub fn gitLong(ctx: *Ctx, cwd: []const u8, args: []const []const u8) !ToolResult {
+        const r = try ctx.runner.run(ctx.arena, .{ .cwd = cwd, .args = args, .long = true });
+        return formatResult(ctx.arena, r);
+    }
+
     /// Records a validation message and returns `error.Invalid`.
     pub fn fail(ctx: *Ctx, comptime fmt: []const u8, a: anytype) error{Invalid} {
         ctx.diag.msg = std.fmt.allocPrint(ctx.arena, fmt, a) catch "invalid arguments (out of memory formatting message)";
@@ -52,7 +59,7 @@ pub fn formatResult(arena: Allocator, r: git_mod.Result) !ToolResult {
     var out: std.ArrayList(u8) = .empty;
     var is_error = true;
     if (r.timed_out) {
-        try out.print(arena, "git timed out after {d}s and was stopped\n", .{r.timeout_ms / 1000});
+        try out.print(arena, "git timed out after {d}s and was stopped. If git was interrupted, a stale .git/*.lock file may need removing.\n", .{r.timeout_ms / 1000});
         try out.appendSlice(arena, r.stderr);
         try out.appendSlice(arena, r.stdout);
     } else if (r.exit_code) |code| {
@@ -134,7 +141,7 @@ test "formatResult failure, signal, timeout" {
 
     const to = try formatResult(a, .{ .exit_code = null, .stdout = "part", .stderr = "", .timed_out = true, .timeout_ms = 30_000 });
     try testing.expect(to.is_error);
-    try testing.expectEqualStrings("git timed out after 30s and was stopped\npart", to.text);
+    try testing.expectEqualStrings("git timed out after 30s and was stopped. If git was interrupted, a stale .git/*.lock file may need removing.\npart", to.text);
 }
 
 test "formatResult sanitizes and truncates" {

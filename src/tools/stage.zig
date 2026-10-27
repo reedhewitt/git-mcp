@@ -124,7 +124,7 @@ fn commit(ctx: *Ctx, args: Args) !ToolResult {
     } else {
         try argv.append(ctx.arena, "--no-edit");
     }
-    return ctx.git(repo, argv.items, false);
+    return ctx.gitLong(repo, argv.items);
 }
 
 const ResetMode = enum { soft, mixed };

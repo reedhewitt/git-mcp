@@ -113,7 +113,7 @@ fn switchTool(ctx: *Ctx, args: Args) !ToolResult {
     if (detach) try appendStr(ctx, &argv, "--detach");
     try appendStr(ctx, &argv, name);
     if (start) |sp| try appendStr(ctx, &argv, sp);
-    return ctx.git(repo, argv.items, false);
+    return ctx.gitLong(repo, argv.items);
 }
 
 const TagAction = enum { list, create };
@@ -173,7 +173,7 @@ fn stash(ctx: *Ctx, args: Args) !ToolResult {
             }
         },
     }
-    return ctx.git(repo, argv.items, false);
+    return ctx.gitLong(repo, argv.items);
 }
 
 // ---------------------------------------------------------------- tests

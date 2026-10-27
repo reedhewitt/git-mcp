@@ -136,9 +136,12 @@ to cost the user work.
     leave it alone. In that case, prompts are still avoided because stdin is `/dev/null`.
   - Pass through the rest of the inherited environment untouched, including `HOME`,
     `SSH_AUTH_SOCK`, and `PATH`.
-  - A timeout kills git (and its children) if it runs too long. The default is generous for
-    network operations, around 2 minutes, and may be shorter for local ones. A timeout
-    returns an error that says it timed out.
+  - A timeout stops git (and its children) if it runs too long: SIGTERM to the process
+    group first so git can remove its lock files, then SIGKILL after a short grace period.
+    The default is generous for network operations and for local operations that run
+    hooks (commit, merge, rebase, cherry-pick, revert, stash, switch), around 2 minutes,
+    and shorter for other local ones. A timeout returns an error that says it timed out
+    and that a stale `.git/*.lock` file may need removing.
 - **Argument safety:**
   - Build argv directly with no shell.
   - Put `--` before pathspecs.

@@ -98,7 +98,7 @@ Every repository tool takes an absolute `repo` path on the host (a leading `~/` 
 | `git_revert` | Create commits that undo earlier ones; `continue`, `skip`, or `abort` on conflict. |
 | `git_resolve` | Resolve conflicted files by taking the `ours` or `theirs` side of each path. |
 
-Every git command is non-interactive: no editor, pager, or terminal prompt can open. Local operations time out after 30 seconds and network operations (`fetch`, `pull`, `push`, `clone`) after 120 seconds, and long output is truncated with a note telling the agent how to narrow the request.
+Every git command is non-interactive: no editor, pager, or terminal prompt can open. Most local operations time out after 30 seconds. Network operations (`fetch`, `pull`, `push`, `clone`) and local operations that run hooks (`commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `stash`, `switch`) get 120 seconds. On a timeout git and its children get SIGTERM, so git can remove its lock files, and SIGKILL 3 seconds later if they are still running. If git was interrupted anyway, a stale `.git/*.lock` file may need removing. Long output is truncated with a note telling the agent how to narrow the request.
 
 ## Deliberately unavailable
 

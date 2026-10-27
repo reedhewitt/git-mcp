@@ -1,5 +1,6 @@
 //! Runs git as a child process with a fixed prefix, a non-interactive
-//! environment, an absolute deadline, process-group kill, and capped capture.
+//! environment, an absolute deadline (SIGTERM, then SIGKILL, to the process
+//! group), and capped capture.
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -14,6 +15,9 @@ pub const RunOpts = struct {
     args: []const []const u8,
     /// Selects the network timeout and the batch-ssh logic.
     network: bool = false,
+    /// Local op that may run hooks (commit, merge, rebase, …): use the
+    /// network-length timeout, without the batch-ssh logic.
+    long: bool = false,
     /// Override (tests).
     timeout_ms: ?u64 = null,
 };
@@ -56,7 +60,7 @@ pub const Runner = struct {
         }
 
         const timeout_ms = opts.timeout_ms orelse
-            if (opts.network) network_timeout_ms else local_timeout_ms;
+            if (opts.network or opts.long) network_timeout_ms else local_timeout_ms;
         // One absolute deadline for the whole invocation.
         const deadline = (Io.Timeout{ .duration = .{
             .raw = .fromMilliseconds(@intCast(timeout_ms)),
@@ -85,7 +89,7 @@ pub const Runner = struct {
         defer {
             // Only reached without a reap on an error path: kill and reap.
             if (term == null) {
-                killGroup(pid);
+                signalGroup(pid, .KILL);
                 _ = reap(pid, false);
             }
             mr.deinit();
@@ -99,6 +103,8 @@ pub const Runner = struct {
         var caps: [2]Capture = .{ .{}, .{} };
         var eof = false;
         var timed_out = false;
+        // Set once SIGTERM has been sent: when to escalate to SIGKILL.
+        var kill_at: ?Io.Clock.Timestamp = null;
         // Set once git has exited: bounds the final drain.
         var drain_until: ?Io.Clock.Timestamp = null;
 
@@ -106,19 +112,29 @@ pub const Runner = struct {
             const now = Io.Clock.Timestamp.now(io, .awake);
             if (term == null) {
                 term = reap(pid, true);
-                if (term != null) drain_until = now.addDuration(slice);
+                // After a timeout, give the rest of the group (hooks, …) the
+                // remaining grace period to finish and close the pipes.
+                if (term != null) drain_until = kill_at orelse now.addDuration(slice);
             }
             if (term != null) {
                 if (eof or now.compare(.gte, drain_until.?)) break;
+            } else if (kill_at) |k| {
+                if (now.compare(.gte, k)) {
+                    signalGroup(pid, .KILL);
+                    term = reap(pid, false);
+                    break;
+                }
             } else if (now.compare(.gte, deadline)) {
-                killGroup(pid);
-                term = reap(pid, false);
+                // SIGTERM first so git can remove its .lock files; SIGKILL
+                // only if the group is still running after the grace period.
+                signalGroup(pid, .TERM);
                 timed_out = true;
-                break;
+                kill_at = now.addDuration(term_grace);
+                continue;
             }
 
             var slice_end = now.addDuration(slice);
-            const limit = drain_until orelse deadline;
+            const limit = drain_until orelse kill_at orelse deadline;
             if (limit.compare(.lt, slice_end)) slice_end = limit;
 
             if (eof) {
@@ -136,6 +152,10 @@ pub const Runner = struct {
             };
             for (&caps, 0..) |*cap, i| try cap.take(arena, mr.reader(i));
         }
+        // Nothing from a timed-out group may outlive the call (e.g. a child
+        // that ignores SIGTERM after git itself exited). The group id is not
+        // reused while members remain, so this is safe after the reap.
+        if (timed_out) signalGroup(pid, .KILL);
         try mr.checkAnyError();
 
         return .{
@@ -172,6 +192,8 @@ const fixed_env = [_][2][]const u8{
 
 /// Read slice length, and the bound on the final drain after git exits.
 const slice: Io.Clock.Duration = .{ .raw = .fromMilliseconds(250), .clock = .awake };
+/// How long the group gets after SIGTERM before SIGKILL.
+const term_grace: Io.Clock.Duration = .{ .raw = .fromSeconds(3), .clock = .awake };
 /// How often to check for exit once both pipes are at EOF.
 const poll_interval: Io.Clock.Duration = .{ .raw = .fromMilliseconds(10), .clock = .awake };
 
@@ -191,10 +213,10 @@ const Capture = struct {
     }
 };
 
-/// SIGKILL the whole process group led by `pid` (git plus ssh, hooks, …).
+/// Signals the whole process group led by `pid` (git plus ssh, hooks, …).
 /// Errors are ignored: the group may already be gone.
-fn killGroup(pid: std.posix.pid_t) void {
-    std.posix.kill(-pid, .KILL) catch {};
+fn signalGroup(pid: std.posix.pid_t, sig: std.posix.SIG) void {
+    std.posix.kill(-pid, sig) catch {};
 }
 
 /// waitpid on `pid`; with `nohang`, returns null if it is still running.
@@ -309,6 +331,54 @@ test "times out and kills the process group" {
     try testing.expect(ms >= 400);
     try testing.expect(ms < 3000);
     try testing.expect(try noProcessMatching("sleep 31"));
+}
+
+test "timeout sends SIGTERM first so git can clean up" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try f.initRepo("r");
+    const start = Io.Clock.Timestamp.now(testing.io, .awake);
+    const res = try f.runner.run(f.arena(), .{
+        .cwd = r,
+        .args = &.{ "-c", "alias.trm=!trap 'echo term >&2; exit 1' TERM; sleep 33", "trm" },
+        .timeout_ms = 500,
+    });
+    const ms = elapsedMs(start);
+    try testing.expect(res.timed_out);
+    try testing.expect(std.mem.indexOf(u8, res.stderr, "term") != null);
+    try testing.expect(ms < 3000);
+    try testing.expect(try noProcessMatching("sleep 33"));
+}
+
+test "timeout escalates to SIGKILL when SIGTERM is ignored" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try f.initRepo("r");
+    const start = Io.Clock.Timestamp.now(testing.io, .awake);
+    const res = try f.runner.run(f.arena(), .{
+        .cwd = r,
+        .args = &.{ "-c", "alias.ign=!trap '' TERM; sleep 34", "ign" },
+        .timeout_ms = 500,
+    });
+    const ms = elapsedMs(start);
+    try testing.expect(res.timed_out);
+    try testing.expectEqual(@as(?u8, null), res.exit_code);
+    // 0.5 s deadline + 3 s grace before SIGKILL.
+    try testing.expect(ms >= 3000);
+    try testing.expect(ms < 4500);
+    try testing.expect(try noProcessMatching("sleep 34"));
+}
+
+test "long ops get the network-length timeout without batch ssh" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try f.initRepo("r");
+    const res = try f.runner.run(f.arena(), .{ .cwd = r, .args = &.{ "-c", "alias.e=!env", "e" }, .long = true });
+    try testing.expectEqual(@as(?u8, 0), res.exit_code);
+    try testing.expectEqual(network_timeout_ms, res.timeout_ms);
+    try testing.expect(std.mem.indexOf(u8, res.stdout, "GIT_SSH_COMMAND=") == null);
+    const local = try f.runner.run(f.arena(), .{ .cwd = r, .args = &.{ "rev-parse", "HEAD" } });
+    try testing.expectEqual(local_timeout_ms, local.timeout_ms);
 }
 
 test "returns promptly when grandchild keeps stderr open" {
