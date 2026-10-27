@@ -99,11 +99,8 @@ fn pull(ctx: *Ctx, args: Args) !ToolResult {
     const r = try optRemote(ctx, args);
     const branch = try args.str("branch");
     if (branch) |b| {
-        try validate.checkName("branch", b, &ctx.diag);
-        // A refspec here could force-update or write into a local branch.
-        if (b[0] == '+' or std.mem.indexOfScalar(u8, b, ':') != null) {
-            return ctx.fail("'branch' must be a plain branch name, not a refspec", .{});
-        }
+        // A refspec or glob here could force-update or write local branches.
+        try validate.checkBranch(b, &ctx.diag);
         if (r == null) return ctx.fail("'branch' requires 'remote'", .{});
     }
     var argv: std.ArrayList([]const u8) = .empty;
@@ -343,6 +340,34 @@ test "push rejects force-looking branch names" {
     }
     const bad_remote = try f.call("git_push", try std.fmt.allocPrint(f.arena(), "{{\"repo\":\"{s}\",\"remote\":\"--mirror\"}}", .{r.a}));
     try expectErr(bad_remote, "'-'");
+}
+
+test "push rejects glob branch names and pushes nothing" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try pushedRepo(f);
+    _ = try f.git(r.a, &.{ "branch", "extra1" });
+    _ = try f.git(r.a, &.{ "branch", "extra2" });
+    const before = try f.git(r.bare, &.{ "for-each-ref", "--format=%(refname)" });
+    for ([_][]const u8{ "*", "extra?", "extra[12]" }) |b| {
+        const res = try f.call("git_push", try std.fmt.allocPrint(f.arena(), "{{\"repo\":\"{s}\",\"branch\":\"{s}\"}}", .{ r.a, b }));
+        try expectErr(res, "not a valid branch name");
+    }
+    // A glob upstream in config is rejected too.
+    _ = try f.git(r.a, &.{ "config", "branch.main.merge", "refs/heads/*" });
+    try expectErr(try f.call("git_push", try std.fmt.allocPrint(f.arena(), "{{\"repo\":\"{s}\"}}", .{r.a})), "not a valid branch name");
+    try testing.expectEqualStrings(before, try f.git(r.bare, &.{ "for-each-ref", "--format=%(refname)" }));
+}
+
+test "pull rejects glob and refspec branches" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const r = try pushedRepo(f);
+    for ([_][]const u8{ "*", "+main", "main:main", "a b" }) |b| {
+        const res = try f.call("git_pull", try std.fmt.allocPrint(f.arena(), "{{\"repo\":\"{s}\",\"remote\":\"origin\",\"branch\":\"{s}\"}}", .{ r.a, b }));
+        try expectErr(res, "branch");
+        try testing.expect(!contains(res.text, "git exited"));
+    }
 }
 
 test "push rejects a force-looking upstream from config" {

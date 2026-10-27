@@ -86,11 +86,41 @@ pub fn checkName(kind: []const u8, value: []const u8, diag: *Diag) Error!void {
     if (hasControl(value)) return failFmt(diag, "{s} name must not contain control characters", .{kind});
 }
 
+/// A branch to push: a plain branch name. `+` and `:` get a message about
+/// force pushes and deletions; anything else must pass `checkBranch`.
 pub fn checkPushBranch(value: []const u8, diag: *Diag) Error!void {
     try checkName("branch", value, diag);
     if (value[0] == '+' or std.mem.indexOfScalar(u8, value, ':') != null) {
         return fail(diag, "force pushes and remote deletions are not supported; run them in a terminal");
     }
+    try checkBranch(value, diag);
+}
+
+/// A single, real branch name: `checkName` plus git's ref-format rules
+/// (as `git check-ref-format --branch`), so no globs, refspecs, or ranges.
+/// A leading `+` is rejected too: it would read as a forced refspec.
+pub fn checkBranch(value: []const u8, diag: *Diag) Error!void {
+    try checkName("branch", value, diag);
+    if (!isValidBranchName(value)) {
+        return fail(diag, "not a valid branch name: use a single branch name, without globs (*?[), refspecs (+ :), spaces, '..', '@{', or ~^\\");
+    }
+}
+
+fn isValidBranchName(v: []const u8) bool {
+    if (v[0] == '+' or std.mem.eql(u8, v, "@")) return false;
+    if (v[0] == '/' or v[v.len - 1] == '/' or v[v.len - 1] == '.') return false;
+    for ([_][]const u8{ "..", "//", "@{", "/." }) |seq| {
+        if (std.mem.indexOf(u8, v, seq) != null) return false;
+    }
+    if (v[0] == '.') return false;
+    for (v) |c| switch (c) {
+        ' ', '~', '^', ':', '?', '*', '[', '\\' => return false,
+        else => if (c < 0x20 or c == 0x7f) return false,
+    };
+    // No path component may end in ".lock".
+    var it = std.mem.splitScalar(u8, v, '/');
+    while (it.next()) |comp| if (std.mem.endsWith(u8, comp, ".lock")) return false;
+    return true;
 }
 
 pub fn checkPath(value: []const u8, diag: *Diag) Error!void {
@@ -193,6 +223,27 @@ test "checkName / checkPushBranch / checkUrl" {
     try expectError(error.Invalid, checkUrl("-uexample", &diag));
     try checkUrl("git@example.com:o/r.git", &diag);
     try checkUrl("https://example.com/r.git", &diag);
+}
+
+test "checkBranch rejects globs, refspecs, and invalid ref names" {
+    var diag: Diag = .{};
+    for ([_][]const u8{ "main", "feature/x", "v1.2", "a-b_c", "user@host" }) |ok| {
+        try checkBranch(ok, &diag);
+        try checkPushBranch(ok, &diag);
+    }
+    for ([_][]const u8{
+        "*",        "feat/*",   "a?b",   "a[b",    "a\\b", "a b",    "a~1",    "a^",
+        "a..b",     "/a",       "a/",    "a//b",   ".a",     "a/.b",   "a.lock", "a.",
+        "@",        "a@{1}",    "+main", "main:x", "-f",     "",
+    }) |bad| {
+        try expectError(error.Invalid, checkBranch(bad, &diag));
+        try expectError(error.Invalid, checkPushBranch(bad, &diag));
+    }
+    try expectError(error.Invalid, checkPushBranch("*", &diag));
+    try expect(std.mem.indexOf(u8, diag.msg, "not a valid branch name") != null);
+    // Force-looking input keeps the specific message.
+    try expectError(error.Invalid, checkPushBranch("+main", &diag));
+    try expect(std.mem.indexOf(u8, diag.msg, "terminal") != null);
 }
 
 test "checkPath" {
