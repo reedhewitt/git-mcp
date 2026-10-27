@@ -26,6 +26,8 @@ pub const Result = struct {
     timed_out: bool = false,
     /// True if either stream exceeded `capture_cap`.
     truncated: bool = false,
+    /// The deadline that applied, so a timeout can be reported.
+    timeout_ms: u64 = 0,
 };
 
 /// Explicit because `run` and `needsBatchSsh` call each other.
@@ -145,6 +147,7 @@ pub const Runner = struct {
             .stderr = caps[1].buf.items,
             .timed_out = timed_out,
             .truncated = caps[0].truncated or caps[1].truncated,
+            .timeout_ms = timeout_ms,
         };
     }
 

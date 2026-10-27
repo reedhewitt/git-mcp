@@ -3,6 +3,8 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const git_mod = @import("git.zig");
+const common = @import("tools/common.zig");
+const registry = @import("tools/registry.zig");
 
 pub const Fixture = struct {
     arena_state: std.heap.ArenaAllocator,
@@ -33,6 +35,9 @@ pub const Fixture = struct {
         try f.env.put("HOME", f.root);
         try f.env.put("GIT_CONFIG_GLOBAL", "/dev/null");
         try f.env.put("GIT_CONFIG_NOSYSTEM", "1");
+        // The temp dir lives under this project's .zig-cache; stop git's
+        // repository discovery there so it never finds the project's .git.
+        try f.env.put("GIT_CEILING_DIRECTORIES", std.fs.path.dirname(f.root) orelse f.root);
         try f.env.put("GIT_AUTHOR_NAME", "Test");
         try f.env.put("GIT_COMMITTER_NAME", "Test");
         try f.env.put("GIT_AUTHOR_EMAIL", "test@example.com");
@@ -97,6 +102,16 @@ pub const Fixture = struct {
         _ = try f.git(repo, &.{ "commit", "-q", m });
     }
 
+    /// Calls tool `tool` with `args_json` (a JSON object) the way `tools/call`
+    /// does, with HOME set to the fixture root.
+    pub fn call(f: *Fixture, tool: []const u8, args_json: []const u8) !common.ToolResult {
+        const t = registry.find(tool) orelse return error.UnknownTool;
+        const v = try std.json.parseFromSliceLeaky(std.json.Value, f.arena(), args_json, .{});
+        if (v != .object) return error.ArgsNotObject;
+        var ctx: common.Ctx = .{ .arena = f.arena(), .runner = &f.runner, .home = f.root };
+        return common.invoke(&ctx, t, .{ .obj = &v.object, .diag = &ctx.diag });
+    }
+
     fn writeAbs(abs: []const u8, contents: []const u8) !void {
         const io = std.testing.io;
         const cwd = Io.Dir.cwd();
@@ -115,4 +130,13 @@ test "fixture commits with isolated identity" {
     const bare = try f.initBare("b.git");
     const is_bare = try f.git(bare, &.{ "rev-parse", "--is-bare-repository" });
     try std.testing.expectEqualStrings("true\n", is_bare);
+}
+
+test "fixture root is outside any repository" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    // Without GIT_CEILING_DIRECTORIES, git would walk up from the temp dir
+    // (under .zig-cache) and find the enclosing project's own .git.
+    const res = try f.runner.run(f.arena(), .{ .cwd = f.root, .args = &.{ "rev-parse", "--git-dir" } });
+    try std.testing.expect(res.exit_code == null or res.exit_code.? != 0);
 }
